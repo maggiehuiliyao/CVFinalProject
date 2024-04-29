@@ -348,26 +348,56 @@ class E_MHSA(nn.Module):
     """
     Efficient Multi-Head Self Attention
     """
+    
+    # def __init__(self, dim, out_dim=None, head_dim=32, qkv_bias=True, qk_scale=None,
+    #              attn_drop=0, proj_drop=0., sr_ratio=1):
+    #     super().__init__()
+    #     self.dim = dim
+    #     self.out_dim = out_dim if out_dim is not None else dim
+    #     self.num_heads = self.dim // head_dim
+    #     self.scale = qk_scale or head_dim ** -0.5
+    #     self.q = nn.Linear(dim, self.dim, bias=qkv_bias)
+    #     self.k = nn.Linear(dim, self.dim, bias=qkv_bias)
+    #     self.v = nn.Linear(dim, self.dim, bias=qkv_bias)
+    #     self.proj = nn.Linear(self.dim, self.out_dim)
+    #     self.attn_drop = nn.Dropout(attn_drop)
+    #     self.proj_drop = nn.Dropout(proj_drop)
+
+    #     self.sr_ratio = sr_ratio
+    #     self.N_ratio = sr_ratio ** 2
+    #     if sr_ratio > 1:
+    #         self.sr = nn.AvgPool1d(kernel_size=self.N_ratio, stride=self.N_ratio)
+    #         self.norm = nn.BatchNorm1d(dim, eps=NORM_EPS)
+    #     self.is_bn_merged = False
+
     def __init__(self, dim, out_dim=None, head_dim=32, qkv_bias=True, qk_scale=None,
                  attn_drop=0, proj_drop=0., sr_ratio=1):
+                 
+        #self, d_model, , dropout=0.0):
         super().__init__()
         self.dim = dim
         self.out_dim = out_dim if out_dim is not None else dim
         self.num_heads = self.dim // head_dim
         self.scale = qk_scale or head_dim ** -0.5
-        self.q = nn.Linear(dim, self.dim, bias=qkv_bias)
-        self.k = nn.Linear(dim, self.dim, bias=qkv_bias)
-        self.v = nn.Linear(dim, self.dim, bias=qkv_bias)
-        self.proj = nn.Linear(self.dim, self.out_dim)
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj_drop = nn.Dropout(proj_drop)
-
-        self.sr_ratio = sr_ratio
-        self.N_ratio = sr_ratio ** 2
-        if sr_ratio > 1:
-            self.sr = nn.AvgPool1d(kernel_size=self.N_ratio, stride=self.N_ratio)
-            self.norm = nn.BatchNorm1d(dim, eps=NORM_EPS)
+        self.qkv = nn.Linear(dim, dim * 3)
+        self.out = nn.Linear(dim, dim)
+        self.dropout = nn.Dropout(attn_drop) 
         self.is_bn_merged = False
+
+    def forward(self, x):
+        '''x: (B, T, D)'''
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
+        q = q / q.norm(dim=-1, keepdim=True)
+        k = k / k.norm(dim=-1, keepdim=True)
+        
+        kvw = k * v
+        if self.dropout.p > 0:
+            kvw = self.dropout(kvw.transpose(-1, -2)).transpose(-1, -2) # dropout in seq dimension 
+        out = kvw.sum(dim=-2, keepdim=True) * q
+        return self.out(out)
+
+    
+
 
     def merge_bn(self, pre_bn):
         merge_pre_bn(self.q, pre_bn)
@@ -379,35 +409,7 @@ class E_MHSA(nn.Module):
             merge_pre_bn(self.v, pre_bn)
         self.is_bn_merged = True
 
-    def forward(self, x):
-        B, N, C = x.shape
-        q = self.q(x)
-        q = q.reshape(B, N, self.num_heads, int(C // self.num_heads)).permute(0, 2, 1, 3)
 
-        if self.sr_ratio > 1:
-            x_ = x.transpose(1, 2)
-            x_ = self.sr(x_)
-            if not torch.onnx.is_in_onnx_export() and not self.is_bn_merged:
-                x_ = self.norm(x_)
-            x_ = x_.transpose(1, 2)
-            k = self.k(x_)
-            k = k.reshape(B, -1, self.num_heads, int(C // self.num_heads)).permute(0, 2, 3, 1)
-            v = self.v(x_)
-            v = v.reshape(B, -1, self.num_heads, int(C // self.num_heads)).permute(0, 2, 1, 3)
-        else:
-            k = self.k(x)
-            k = k.reshape(B, -1, self.num_heads, int(C // self.num_heads)).permute(0, 2, 3, 1)
-            v = self.v(x)
-            v = v.reshape(B, -1, self.num_heads, int(C // self.num_heads)).permute(0, 2, 1, 3)
-        attn = (q @ k) * self.scale
-
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
 
 
 class LTB(nn.Module):
